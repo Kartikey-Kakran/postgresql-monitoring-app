@@ -46,84 +46,6 @@ def execute_query(sql):
         cur.execute(sql)
     conn.commit()
 
-# --------------------------------------------------
-# RECORD CURRENT METRICS
-# --------------------------------------------------
-#
-# execute_query("""
-# INSERT INTO monitoring.database_metrics (
-#
-#     database_name,
-#     database_size,
-#
-#     total_connections,
-#     active_connections,
-#     idle_connections,
-#
-#     cache_hit_ratio,
-#
-#     xact_commit,
-#     xact_rollback,
-#
-#     blks_read,
-#     blks_hit,
-#
-#     tup_returned,
-#     tup_fetched,
-#     tup_inserted,
-#     tup_updated,
-#     tup_deleted
-#
-# )
-#
-# SELECT
-#
-#     current_database(),
-#
-#     pg_database_size(current_database()),
-#
-#     (
-#         SELECT count(*)
-#         FROM pg_stat_activity
-#         WHERE datname = current_database()
-#     ),
-#
-#     (
-#         SELECT count(*)
-#         FROM pg_stat_activity
-#         WHERE datname = current_database()
-#         AND state = 'active'
-#     ),
-#
-#     (
-#         SELECT count(*)
-#         FROM pg_stat_activity
-#         WHERE datname = current_database()
-#         AND state = 'idle'
-#     ),
-#
-#     round(
-#         100.0 * blks_hit /
-#         NULLIF(blks_hit + blks_read, 0),
-#         2
-#     ),
-#
-#     xact_commit,
-#     xact_rollback,
-#
-#     blks_read,
-#     blks_hit,
-#
-#     tup_returned,
-#     tup_fetched,
-#     tup_inserted,
-#     tup_updated,
-#     tup_deleted
-#
-# FROM pg_stat_database
-# 
-# WHERE datname = current_database();
-# """)
 
 # --------------------------------------------------
 # DATABASE INFO
@@ -316,12 +238,53 @@ else:
 
 st.divider()
 
+# --------------------------------------------------
+# QUERY PANEL
+# --------------------------------------------------
+
+st.subheader("SQL Query")
+st.caption("Run a read-only query and view its results. Results are limited to 10,000 rows.")
+
+query_text = st.text_area(
+    "Query",
+    value="SELECT *\nFROM monitoring.database_metrics\nORDER BY recorded_at DESC\nLIMIT 100;",
+    height=180,
+    key="sql_query_input",
+)
+
+if st.button("Run query", type="primary", key="run_sql_query"):
+    if not query_text.strip():
+        st.warning("Enter a SQL query first.")
+    else:
+        try:
+            # Clear any read transaction left open by the dashboard before
+            # starting a transaction that PostgreSQL enforces as read-only.
+            conn.rollback()
+            with conn.cursor() as cur:
+                cur.execute("SET TRANSACTION READ ONLY")
+                cur.execute(query_text)
+
+                if cur.description is None:
+                    st.info("The query completed without returning rows.")
+                else:
+                    columns = [column.name for column in cur.description]
+                    rows = cur.fetchmany(10001)
+                    results = pd.DataFrame(rows[:10000], columns=columns)
+                    st.caption(f"Showing {len(results):,} row(s).")
+                    st.dataframe(results, use_container_width=True, hide_index=True)
+                    if len(rows) > 10000:
+                        st.info("Results were truncated at 10,000 rows.")
+        except Exception as exc:
+            st.error(f"Query failed: {exc}")
+        finally:
+            conn.rollback()
+
 
 # --------------------------------------------------
 # LONG RUNNING QUERIES
 # --------------------------------------------------
 
-st.subheader("🐌 Long Running Queries (> 5 minutes)")
+st.subheader("🐌 Long Running Queries (> 30 minutes)")
 
 long_queries = query_df("""
 SELECT
@@ -336,12 +299,12 @@ SELECT
 FROM pg_stat_activity
 WHERE datname = current_database()
   AND query_start IS NOT NULL
-  AND now() - query_start > interval '5 minutes'
+  AND now() - query_start > interval '30 minutes'
 ORDER BY query_start;
 """)
 
 if long_queries.empty:
-    st.success("No queries running longer than 5 minutes")
+    st.success("No queries running longer than 30 minutes")
 
 else:
     st.warning(
